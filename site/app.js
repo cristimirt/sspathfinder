@@ -1,0 +1,982 @@
+(function () {
+  'use strict';
+
+  const D = window.SSAR;
+  const $ = (s, el) => (el || document).querySelector(s);
+  const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const norm = (s) => String(s).toLowerCase().replace(/[^a-z0-9]/g, '');
+
+  // ---------------------------------------------------------------- level colours
+  // One rainbow over the whole range: violet at level 1 through indigo, blue, green, yellow and orange to red at level 450.
+  // A straight line: Sigmastorm levels only go up to 440, so the colours are spread evenly over them.
+  const RAINBOW = [[123, 31, 162], [75, 54, 190], [44, 102, 230], [39, 174, 96], [226, 196, 0], [239, 125, 26], [205, 40, 40]];
+  const TOP_LEVEL = 450;
+  const levelT = (l) => Math.max(0, Math.min(1, (l - 1) / (TOP_LEVEL - 1))); // 0 .. 1 along the rainbow
+  function levelRGB(l) {
+    const x = levelT(l) * (RAINBOW.length - 1);
+    const i = Math.min(Math.floor(x), RAINBOW.length - 2);
+    const f = x - i;
+    return RAINBOW[i].map((v, k) => Math.round(v + (RAINBOW[i + 1][k] - v) * f));
+  }
+  const rgbStr = (c) => c.join(',');
+  const isLight = (c) => (0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]) / 255 > 0.62;
+
+  // ---------------------------------------------------------------- icons
+  const ICON = {
+    portal: '<span class="ico" title="Portal"><svg viewBox="0 0 16 16"><ellipse cx="8" cy="8" rx="6.2" ry="7" fill="#0b2f3a" stroke="#a7fffd" stroke-width="1.3"/><ellipse cx="8" cy="8" rx="3.2" ry="4.2" fill="#a7fffd" opacity=".85"/></svg></span>',
+    shop: '<span class="ico" title="Shop"><svg viewBox="0 0 16 16"><path d="M3 6.5h10l-1 8H4z" fill="#f0c24b" stroke="#6b4b00"/><path d="M5.5 6.5V4.8a2.5 2.5 0 0 1 5 0v1.7" fill="none" stroke="#6b4b00" stroke-width="1.2"/></svg></span>',
+    quest: '<span class="ico" title="Quest"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="#ffd54a" stroke="#6b4b00"/><rect x="7.1" y="3.6" width="1.8" height="5.4" rx=".9" fill="#6b4b00"/><circle cx="8" cy="11.6" r="1.05" fill="#6b4b00"/></svg></span>',
+    bank: '<span class="ico" title="Bank"><svg viewBox="0 0 16 16"><path d="M8 1.5 14.5 5.5H1.5z" fill="#cfd6d9" stroke="#333"/><path d="M3.2 7v5M6.1 7v5M9.9 7v5M12.8 7v5" stroke="#8a9296" stroke-width="1.7"/><rect x="1.5" y="12.5" width="13" height="2" fill="#cfd6d9" stroke="#333"/></svg></span>',
+    relic: '<span class="ico" title="Artifact"><svg viewBox="0 0 16 16"><path d="M8 1.5l5 5-5 8-5-8z" fill="#7be0ff" stroke="#0b4a63"/><path d="M3 6.5h10M8 1.5l-2 5 2 8 2-8z" fill="none" stroke="#0b4a63" stroke-width=".7"/></svg></span>',
+    next: '<span class="ico" title="Continues on another page">&#8599;</span>',
+  };
+
+  // ---------------------------------------------------------------- data
+  const R = SSRoute.create(D);
+  const { byName, masters, realms, adj, drawn } = R;
+  const LAST_LEVEL = D.pages[D.pages.length - 1].max;
+  const pageAtLevel = [];
+  D.pages.forEach((p) => { for (let l = p.min; l <= p.max; l++) pageAtLevel[l] = p; });
+  const pageOf = (a) => pageAtLevel[a.level] || D.pages[D.pages.length - 1];
+
+  // how far a realm is from the world map of its own master realm (row on the page)
+  const depth = {};
+  masters.forEach((m) => {
+    const q = [];
+    (m.entries || []).forEach((n) => {
+      const r = byName[n];
+      if (r && r.world === m.name && depth[n] == null) { depth[n] = 1; q.push(n); }
+    });
+    while (q.length) {
+      const cur = q.shift();
+      adj[cur].forEach((e) => {
+        const o = byName[e.to];
+        if (e.kind === 'stairs' && o && o.kind === 'realm' && o.world === byName[cur].world && depth[o.name] == null) {
+          depth[o.name] = depth[cur] + 1;
+          q.push(o.name);
+        }
+      });
+    }
+  });
+  let changed = true;
+  while (changed) {
+    changed = false;
+    realms.forEach((r) => {
+      if (depth[r.name] != null) return;
+      let best = null;
+      adj[r.name].forEach((e) => {
+        const o = byName[e.to];
+        if (e.kind === 'stairs' && o && o.world === r.world && depth[o.name] != null && depth[o.name] < 90) best = best == null ? depth[o.name] : Math.min(best, depth[o.name]);
+      });
+      if (best != null) { depth[r.name] = best + 1; changed = true; }
+    });
+  }
+  realms.forEach((r) => { if (depth[r.name] == null) depth[r.name] = 99; });
+
+  const offPage = (a) => a.stairs.map((s) => byName[s.to]).filter((o) => o && pageOf(o).id !== pageOf(a).id);
+  const nextPage = (a) => a.beyond.length > 0 || a.stairs.some((s) => byName[s.to] && pageOf(byName[s.to]).id !== pageOf(a).id);
+
+  // ---------------------------------------------------------------- state
+  const state = { page: D.pages[0].id, pinned: null, hover: null, route: null, openGroup: null, lastGroup: null };
+  const nodeEls = {};
+  const lineEls = {};
+
+  // ---------------------------------------------------------------- node html
+  function nodeHTML(a, extra) {
+    const cls = ['node', a.kind === 'master' ? 'master' : 'realm'];
+    if (a.kind === 'realm' && nextPage(a)) cls.push('next');
+    if (a.event) cls.push('event');
+    if (extra) cls.push(extra);
+    const rgb = levelRGB(a.level);
+    if (isLight(rgb)) cls.push('light');
+    const b = [];
+    if (a.portals && a.portals.length) b.push(ICON.portal);
+    if ((a.shopSpots && a.shopSpots.length) || (a.shops && a.shops.length)) b.push(ICON.shop);
+    if (a.quests && a.quests.length) b.push(ICON.quest);
+    if ((a.services || []).some((v) => v.bank)) b.push(ICON.bank);
+    if ((a.relicSpots && a.relicSpots.length) || (a.relics && a.relics.length)) b.push(ICON.relic);
+    if (a.kind === 'realm' && nextPage(a)) b.push(ICON.next);
+    return '<div class="' + cls.join(' ') + '" data-name="' + esc(a.name) + '" style="--c:rgb(' + rgbStr(rgb) + ')">' +
+      '<span class="lv">' + a.level + '</span>' + (a.dark ? '<span class="dr">DR</span>' : '') +
+      '<span class="nm">' + esc(a.name) + '</span>' +
+      (a.kind === 'master' ? '<span class="sub">Master realm</span>' : '') +
+      '<span class="badges">' + b.join('') + '</span>' + linksHTML(a, 'links', a.kind === 'realm' && offPage(a).length ? '<a data-jump title="Continues on another page: go there">&#8599;</a>' : '') + '</div>';
+  }
+
+  // ---------------------------------------------------------------- page
+  function orderRow(list, prev) {
+    const index = {};
+    (prev || []).forEach((r, i) => { index[r.name] = i; });
+    const score = (r) => {
+      const idx = [];
+      adj[r.name].forEach((e) => { if (e.kind === 'stairs' && index[e.to] != null) idx.push(index[e.to]); });
+      return idx.length ? idx.reduce((p, q) => p + q, 0) / idx.length : Infinity;
+    };
+    return list.slice().sort((x, y) => (score(x) - score(y)) || (x.level - y.level) || x.name.localeCompare(y.name));
+  }
+
+  // Layout: the ELK "layered" algorithm (vendor/elk.bundled.js). The world map is the top row, every realm sits one row below the
+  // realm it is reached from, realms in a row are ordered to cut down crossings, and each connection is a polyline (straight
+  // segments, diagonals allowed, no curves) that leaves the boxes alone.
+  const NW = 108, NH = 52;
+  const elk = new ELK();
+  const ELK_OPTIONS = {
+    'elk.algorithm': 'layered',
+    'elk.direction': 'DOWN',
+    'elk.edgeRouting': 'POLYLINE',
+    'elk.padding': '[top=12,left=12,bottom=12,right=12]',
+    'elk.spacing.nodeNode': '34',
+    'elk.spacing.edgeNode': '18',
+    'elk.spacing.edgeEdge': '14',
+    'elk.spacing.componentComponent': '44',
+    'elk.layered.spacing.nodeNodeBetweenLayers': '52',
+    'elk.layered.spacing.edgeNodeBetweenLayers': '20',
+    'elk.layered.spacing.edgeEdgeBetweenLayers': '14',
+    'elk.separateConnectedComponents': 'true',
+    'elk.aspectRatio': '2',
+    'elk.layered.crossingMinimization.strategy': 'LAYER_SWEEP',
+    'elk.layered.crossingMinimization.thoroughness': '30',
+    'elk.layered.nodePlacement.strategy': 'NETWORK_SIMPLEX',
+  };
+
+  async function layoutCanvas(canvas, members, primary, master) {
+    const els = {};
+    canvas.querySelectorAll('.node').forEach((el) => { els[el.dataset.name] = el; });
+    const set = new Set(members.map((r) => r.name));
+    const idx = {};
+    members.forEach((r, i) => { idx[r.name] = i; });
+    const E = [];
+    drawn.forEach((e, key) => {
+      if (set.has(e.a) && set.has(e.b) && e.a !== e.b && (primary.has(e.a) || primary.has(e.b))) E.push({ a: idx[e.a], b: idx[e.b], key, e });
+    });
+
+    // row of each area: its distance from the world map. Copies of areas of other maps take the average of what they touch.
+    const nbr = members.map(() => []);
+    E.forEach((r) => { nbr[r.a].push(r.b); nbr[r.b].push(r.a); });
+    const layer = members.map((r) => (primary.has(r.name) ? (r.kind === 'master' ? 0 : Math.min(depth[r.name], 6)) : -1));
+    layer.forEach((l, i) => {
+      if (l >= 0) return;
+      const ls = nbr[i].map((j) => layer[j]).filter((x) => x >= 0);
+      layer[i] = ls.length ? Math.round(ls.reduce((p, q) => p + q, 0) / ls.length) : 1;
+    });
+
+    // connections point from the row nearer the world map to the row further away, which is what makes the rows
+    const build = (opts) => ({
+      id: 'root',
+      layoutOptions: opts,
+      children: members.map((r, i) => {
+        const c = { id: 'n' + i, width: NW, height: NH };
+        if (r === master && primary.has(r.name)) c.layoutOptions = { 'elk.layered.layering.layerConstraint': 'FIRST' };
+        return c;
+      }),
+      edges: E.map((r, k) => {
+        const flip = layer[r.a] > layer[r.b] || (layer[r.a] === layer[r.b] && r.a > r.b);
+        return { id: 'e' + k, sources: ['n' + (flip ? r.b : r.a)], targets: ['n' + (flip ? r.a : r.b)] };
+      }),
+    });
+    // a row that is wider than the page is laid out again with a cap on how many areas one row may hold, until it fits
+    const avail = Math.max(2 * NW + 34 + 24, canvas.clientWidth); // at least two columns, so a phone gets a tall, narrow map
+    // on a narrow screen the separate pieces of the map stack in one column instead of sitting side by side
+    const base = avail < 600 ? Object.assign({}, ELK_OPTIONS, { 'elk.aspectRatio': '0.2' }) : ELK_OPTIONS;
+    let res = await elk.layout(build(base));
+    let cap = Math.floor((avail - 24 + 34) / (NW + 34));
+    while (res.width > avail && cap >= 2) {
+      res = await elk.layout(build(Object.assign({}, base, { 'elk.layered.layering.strategy': 'COFFMAN_GRAHAM', 'elk.layered.layering.coffmanGraham.layerBound': String(cap) })));
+      cap--;
+    }
+
+    const pos = {};
+    let routes;
+    if (res.width > avail) {
+      // still too wide for a phone: rows of the grid by distance from the world map, wrapped to what fits, lines straight between boxes
+      const order = res.children.map((c) => ({ c, i: +c.id.slice(1) })).sort((p, q) => layer[p.i] - layer[q.i] || p.c.x - q.c.x);
+      const cols = Math.max(1, Math.floor((avail - 24 + 34) / (NW + 34)));
+      let row = 0, col = 0, prev = null, maxCol = 0;
+      order.forEach((o) => {
+        if (prev !== null && (layer[o.i] !== prev || col === cols)) { row++; col = 0; }
+        prev = layer[o.i];
+        pos[members[o.i].name] = [12 + col * (NW + 34), 12 + row * (NH + 52)];
+        maxCol = Math.max(maxCol, col);
+        col++;
+      });
+      res = { width: 24 + (maxCol + 1) * (NW + 34) - 34, height: 24 + (row + 1) * (NH + 52) - 52 };
+      routes = E.map((r) => ({ key: r.key, a: r.e.a, b: r.e.b, kind: r.e.kind, pts: [] }));
+    } else {
+      res.children.forEach((c) => { pos[members[+c.id.slice(1)].name] = [Math.round(c.x), Math.round(c.y)]; });
+      routes = res.edges.map((ed, k) => {
+        const s = ed.sections && ed.sections[0];
+        const pts = s ? [s.startPoint].concat(s.bendPoints || [], [s.endPoint]).map((p) => [p.x, p.y]) : [];
+        return { key: E[k].key, a: E[k].e.a, b: E[k].e.b, kind: E[k].e.kind, pts, orig: pts };
+      }).filter((r) => r.pts.length > 1);
+    }
+    return { routes, pos, w: Math.ceil(res.width), h: Math.ceil(res.height), narrow: avail < 600 };
+  }
+
+  // ---------------------------------------------------------------- moving boxes by hand
+  // positions live in localStorage, per world map and per layout kind (wide / phone), only for the boxes that were moved
+  const POS_KEY = 'sspf_pos';
+  const loadPos = () => { try { return JSON.parse(localStorage.getItem(POS_KEY)) || {}; } catch (err) { return {}; } };
+  const savePos = (g) => {
+    try {
+      const all = loadPos();
+      const mine = {};
+      g.moved.forEach((n) => { mine[n] = g.cur[n]; });
+      if (g.moved.size) all[g.skey] = mine; else delete all[g.skey];
+      if (Object.keys(all).length) localStorage.setItem(POS_KEY, JSON.stringify(all)); else localStorage.removeItem(POS_KEY);
+    } catch (err) { /* ignore */ }
+  };
+  const centre = (g, n) => [g.cur[n][0] + NW / 2, g.cur[n][1] + NH / 2];
+  function routePts(g, r) {
+    return g.moved.has(r.a) || g.moved.has(r.b) || !r.orig ? [centre(g, r.a), centre(g, r.b)] : r.orig;
+  }
+  function fitCanvas(g) {
+    let w = g.w, h = g.h;
+    Object.keys(g.cur).forEach((n) => { w = Math.max(w, g.cur[n][0] + NW + 12); h = Math.max(h, g.cur[n][1] + NH + 12); });
+    g.canvas.style.width = w + 'px';
+    g.canvas.style.height = h + 'px';
+  }
+  function applyLayout(g) {
+    const saved = loadPos()[g.skey] || {};
+    g.cur = {};
+    g.moved = new Set();
+    Object.keys(g.pos).forEach((n) => {
+      if (saved[n]) { g.cur[n] = saved[n]; g.moved.add(n); } else g.cur[n] = g.pos[n];
+    });
+    g.canvas.querySelectorAll('.node').forEach((el) => {
+      const p = g.cur[el.dataset.name];
+      el.style.left = p[0] + 'px';
+      el.style.top = p[1] + 'px';
+    });
+    fitCanvas(g);
+    g.routes.forEach((r) => { r.pts = routePts(g, r); });
+  }
+
+  const graphs = [];
+  // Put the given areas (plus ghost copies of the areas they connect to in other world maps) on a canvas and route the lines.
+  async function mountGraph(canvas, primaryAreas, master, masterHere, pid) {
+    const primary = new Set(primaryAreas.map((a) => a.name));
+    const ghosts = [];
+    drawn.forEach((e) => {
+      [[e.a, e.b], [e.b, e.a]].forEach(([me, other]) => {
+        const o = byName[other];
+        if (!primary.has(me) || primary.has(other) || ghosts.some((g) => g.name === other)) return;
+        if (o.kind === 'master' || pageOf(o).id === pid) ghosts.push(o);
+      });
+    });
+    canvas.innerHTML = primaryAreas.map((r) => nodeHTML(r, r === master && !masterHere ? 'ghost' : '')).join('') +
+      ghosts.map((g) => nodeHTML(g, 'dup ghost')).join('');
+    const g = await layoutCanvas(canvas, primaryAreas.concat(ghosts), primary, master);
+    g.canvas = canvas;
+    g.skey = canvas.parentElement.id + (g.narrow ? ':n' : ':w');
+    applyLayout(g);
+    return g;
+  }
+
+  let renderToken = 0;
+  function renderPage(pid) {
+    const token = ++renderToken;
+    const jobs = [];
+    state.page = pid;
+    const page = D.pages.find((p) => p.id === pid);
+    const wrap = $('#sections');
+    wrap.innerHTML = '';
+    Object.keys(nodeEls).forEach((k) => delete nodeEls[k]);
+    graphs.length = 0;
+
+    masters.forEach((m) => {
+      const items = realms.filter((r) => r.world === m.name && !r.event && pageOf(r).id === pid);
+      const masterHere = pageOf(m).id === pid;
+      if (!items.length && !masterHere) return;
+
+      const sec = document.createElement('section');
+      sec.className = 'world';
+      sec.id = 'w-' + norm(m.name);
+
+      const head = document.createElement('div');
+      head.className = 'world-head';
+      head.innerHTML = '<div class="meta"><b>' + esc(m.name) + '</b> master realm &middot; ' + items.length + ' area' + (items.length === 1 ? '' : 's') + ' on this page' +
+        (masterHere ? '' : ' (the master realm is on <b>' + esc(pageOf(m).label) + '</b>)') +
+        (m.portalAreas && m.portalAreas.length ? '<br>Portals in: ' + m.portalAreas.map(esc).join(', ') : '') +
+        '<br>' + linksHTML(m, 'hlinks') + '</div>';
+      sec.appendChild(head);
+
+      // free-form graph: the master realm and its realms, positioned so no line runs under a node
+      const canvas = document.createElement('div');
+      canvas.className = 'canvas';
+      sec.appendChild(canvas);
+      wrap.appendChild(sec);
+      jobs.push(mountGraph(canvas, [m].concat(items), m, masterHere, pid));
+    });
+
+    // event-only areas (Christmas, Halloween, ...) are not part of any world map: one section of their own
+    const ev = realms.filter((r) => r.event && pageOf(r).id === pid);
+    if (ev.length) {
+      const sec = document.createElement('section');
+      sec.className = 'world';
+      sec.id = 'w-events';
+      sec.innerHTML = '<div class="world-head"><div class="meta"><b>Special event areas</b> &middot; ' + ev.length + ' on this page<br>Slaughterfest arenas and other areas with no stairs to the rest of the game.</div></div>';
+      const canvas = document.createElement('div');
+      canvas.className = 'canvas';
+      sec.appendChild(canvas);
+      wrap.appendChild(sec);
+      jobs.push(mountGraph(canvas, ev, null, true, pid));
+    }
+
+    // an area can also appear as a copy in a neighbouring map (a ghost); the real box is the one that gets highlighted
+    wrap.querySelectorAll('.node:not(.dup)').forEach((el) => { nodeEls[el.dataset.name] = el; });
+    wrap.querySelectorAll('.node.dup').forEach((el) => { if (!nodeEls[el.dataset.name]) nodeEls[el.dataset.name] = el; });
+    renderTabs();
+    renderStrip();
+    renderLevelBar();
+    return Promise.all(jobs).then((done) => {
+      if (token !== renderToken) return;
+      graphs.push.apply(graphs, done);
+      drawEdges();
+      applyRoute();
+    });
+  }
+
+  // ---------------------------------------------------------------- lines between areas
+  function drawEdges() {
+    const svg = $('#edges');
+    const map = $('#map');
+    svg.setAttribute('width', map.offsetWidth);
+    svg.setAttribute('height', map.offsetHeight);
+    svg.innerHTML = '';
+    Object.keys(lineEls).forEach((k) => delete lineEls[k]);
+    const base = map.getBoundingClientRect();
+    const frag = document.createDocumentFragment();
+    graphs.forEach((g) => {
+      const cr = g.canvas.getBoundingClientRect();
+      const ox = cr.left - base.left, oy = cr.top - base.top;
+      g.routes.forEach((r) => {
+        const ln = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+        ln.setAttribute('points', r.pts.map((p) => (p[0] + ox).toFixed(1) + ',' + (p[1] + oy).toFixed(1)).join(' '));
+        ln._g = g; ln._r = r;
+        ln.setAttribute('class', 'ln' + (r.kind === 'exit' ? ' exit' : ''));
+        ln.dataset.a = r.a; ln.dataset.b = r.b;
+        lineEls[lineEls[r.key] ? r.key + '#' + frag.childNodes.length : r.key] = ln;
+        frag.appendChild(ln);
+      });
+    });
+    svg.appendChild(frag);
+  }
+
+  // ---------------------------------------------------------------- tabs, world strip, legend
+  function renderTabs() {
+    const t = $('#tabs');
+    if (!renderTabs.counts) {
+      renderTabs.counts = {};
+      realms.forEach((r) => { if (!r.event) { const id = pageOf(r).id; renderTabs.counts[id] = (renderTabs.counts[id] || 0) + 1; } });
+    }
+    const cnt = renderTabs.counts;
+    const cur = D.pages.find((p) => p.id === state.page);
+    const groups = [];
+    D.pages.forEach((p) => {
+      let g = groups[groups.length - 1];
+      if (!g || g.name !== p.group) groups.push(g = { name: p.group, pages: [] });
+      g.pages.push(p);
+    });
+    // one group open at a time: the one holding the current page, unless the user opened another one since
+    if (state.lastGroup !== cur.group) { state.lastGroup = cur.group; state.openGroup = cur.group; }
+    t.innerHTML = groups.map((g) => {
+      const total = g.pages.reduce((s, p) => s + (cnt[p.id] || 0), 0);
+      return '<details data-g="' + esc(g.name) + '"' + (g.name === state.openGroup ? ' open' : '') + '><summary><span>' + esc(g.name) + '</span><small>' + total + '</small></summary>' +
+        g.pages.map((p) => '<button type="button" data-p="' + p.id + '" class="' + (p.id === state.page ? 'on' : '') + '">' + esc(p.label) + '<small>' + (cnt[p.id] || 0) + '</small></button>').join('') + '</details>';
+    }).join('');
+    const on = t.querySelector('.on');
+    const side = $('#side');
+    if (on) {
+      const r = on.getBoundingClientRect(), s = side.getBoundingClientRect();
+      if (r.top < s.top + 30 || r.bottom > s.bottom) side.scrollTop += r.top - s.top - s.height / 3;
+    }
+    $('#pageTitle').textContent = cur.group + ' › ' + cur.label;
+  }
+  function renderStrip() {
+    // only the world maps that have a section on this page
+    const here = masters.filter((m) => !!$('#w-' + norm(m.name)));
+    $('#worldStrip').innerHTML = here.map((m, i) => {
+      return (i ? '<span class="sep">&middot;</span>' : '') +
+        '<span class="w" data-w="' + esc(m.name) + '" style="--c:rgb(' + rgbStr(levelRGB(m.level)) + ')" title="Level ' + m.level + '">' + esc(m.name) + '</span>';
+    }).join('');
+  }
+  // The bar always runs from level 1 to 450, but the levels of the page you are looking at take the wide middle part of it
+  // (a "fisheye": the levels below and above are squeezed into the sides). The colours are the same as on the realms.
+  function renderLevelBar() {
+    const el = $('#lvBar');
+    if (!el) return;
+    const pg = D.pages.find((x) => x.id === state.page) || D.pages[0];
+    const lo = pg.min, hi = Math.max(pg.max, pg.min + 1);
+    const tlo = levelT(lo), thi = levelT(hi);
+    const L = Math.min(0.3, tlo * 3); // share of the bar for the levels below the page (less when the page is at the very start)
+    const R = Math.min(0.3, (1 - thi) * 3); // and above it
+    const F = 1 - L - R;
+    const levelAt = (x) => {
+      if (x < L) return 1 + (lo - 1) * (x / L);
+      if (x <= L + F) return lo + (hi - lo) * ((x - L) / F);
+      return hi + (TOP_LEVEL - hi) * ((x - L - F) / R);
+    };
+    const posOf = (l) => {
+      if (l < lo) return lo > 1 ? L * (l - 1) / (lo - 1) : 0;
+      if (l <= hi) return L + F * (l - lo) / (hi - lo);
+      return L + F + R * (l - hi) / (TOP_LEVEL - hi);
+    };
+    const N = 240;
+    const grad = 'linear-gradient(90deg,' + Array.from({ length: N }, (_, k) => {
+      const x = k / (N - 1);
+      return 'rgb(' + rgbStr(levelRGB(levelAt(x))) + ') ' + (x * 100).toFixed(2) + '%';
+    }).join(',') + ')';
+    // labels: the edges of this page first, then the round numbers that still fit
+    const placed = [];
+    [lo, hi, 1, 450, 100, 200, 300, 400, 50, 150, 250, 350].forEach((l, k) => {
+      if (k >= 2 && l >= lo && l <= hi) return;
+      const p = posOf(l) * 100;
+      if (placed.every((q) => Math.abs(q.p - p) >= 9)) placed.push({ l, p });
+    });
+    const ticks = placed.map((q) => '<span style="left:' + q.p.toFixed(2) + '%;transform:translateX(' + (q.p < 2 ? 0 : q.p > 98 ? -100 : -50) + '%)">' + q.l + '</span>').join('');
+    el.innerHTML = '<div class="bar" style="background:' + grad + '"></div><div class="lvfocus" style="left:' + (L * 100).toFixed(2) + '%;width:' + (F * 100).toFixed(2) + '%"></div><div class="bar-l">' + ticks + '</div>';
+  }
+  function renderLegend() {
+    const mini = (cls, label, extra, name) =>
+      '<div class="it"><div class="node ' + cls + ' legend-node" style="--c:' + extra + '"><span class="nm">' + name + '</span></div><span>' + label + '</span></div>';
+    $('#legend').innerHTML =
+      mini('master', '<b>Master realm</b> (sector map)', 'rgb(' + rgbStr(levelRGB(20)) + ')', 'Name') +
+      mini('realm', '<b>Area</b>', 'rgb(' + rgbStr(levelRGB(20)) + ')', 'Name') +
+      mini('realm next', '<b>Continues</b> on another page (the &#8599; tab under it goes there)', 'rgb(' + rgbStr(levelRGB(20)) + ')', 'Name') +
+      mini('realm event', '<b>Special event</b> area (no stairs)', '#6f747d', 'Name') +
+      '<div class="it">' + ICON.portal + '<span><b>Portal</b> &mdash; coordinates in the info card</span></div>' +
+      '<div class="it">' + ICON.shop + '<span><b>Shop</b></span></div>' +
+      '<div class="it">' + ICON.quest + '<span><b>Quest</b></span></div>' +
+      '<div class="it">' + ICON.bank + '<span><b>Bank</b> (a vault or savings building)</span></div>' +
+      '<div class="it">' + ICON.relic + '<span><b>Artifact</b></span></div>' +
+      '<div class="it"><svg class="lsample" width="34" height="10" aria-hidden="true"><line class="sample" x1="1" y1="5" x2="33" y2="5"/></svg><span><b>Solid line</b> &mdash; stairs between two areas</span></div>' +
+      '<div class="it"><svg class="lsample" width="34" height="10" aria-hidden="true"><line class="sample exit" x1="1" y1="5" x2="33" y2="5"/></svg><span><b>Dotted line</b> &mdash; to or from a sector map (leave the area / enter it from the sector map)</span></div>' +
+      mini('realm ghost', '<b>Faded</b> &mdash; belongs to another master realm or page; shown only to say where a connection leads', 'rgb(' + rgbStr(levelRGB(20)) + ')', 'Name') +
+      '<div class="it"><div id="lvBar"></div><span>Minimum <b>level</b> (1 &ndash; 440). The levels on this page get the wide middle part.</span></div>';
+    renderLevelBar();
+  }
+
+  // ---------------------------------------------------------------- info card
+  // The guide has a page per area (realm_id); master realms (sector maps) have none, so only the wiki is linked for them.
+  const guideUrl = (a) => (a.guideId && a.kind === 'realm'
+    ? 'https://guide.sigmastorm.com/index.php?cmd=realms&subcmd=view&realm_id=' + a.guideId
+    : null);
+  const wikiUrl = (a) => 'https://sigmastorm2.fandom.com/wiki/' +
+    encodeURIComponent((a.wikiTitle || a.name).replace(/ /g, '_')).replace(/%28/g, '(').replace(/%29/g, ')').replace(/%2C/g, ',').replace(/%27/g, "'");
+  // the small tabs under an area say just G and W; next to a master realm's name they are spelled out
+  const linksHTML = (a, cls, extra) => {
+    const short = cls === 'links';
+    const g = guideUrl(a);
+    return '<span class="' + cls + '">' + (g ? '<a href="' + g + '" target="_blank" rel="noopener" title="Open ' + esc(a.name) + ' in the Guide">' + (short ? 'G' : 'Guide') + '</a>' : '') +
+      '<a href="' + wikiUrl(a) + '" target="_blank" rel="noopener" title="Open ' + esc(a.name) + ' on the Wiki">' + (short ? 'W' : 'Wiki') + '</a>' + (extra || '') + '</span>';
+  };
+  const coord = (x, y) => (x != null && y != null ? '<span class="coord">(' + x + ',' + y + ')</span>' : '');
+
+  function questHTML(q) {
+    return '<li>' + esc(q) + '</li>';
+  }
+  function section(title, icon, body, empty) {
+    return '<h4>' + (icon || '') + title + '</h4>' + (body || '<div class="none">' + (empty || 'None') + '</div>');
+  }
+
+  function cardHTML(a, pinned) {
+    const tags = ['<span class="tag lv">Level ' + a.level + '</span>'];
+    tags.push('<span class="tag">' + (a.kind === 'master' ? 'Master realm (sector map)' : 'Area') + '</span>');
+    if (a.kind === 'realm' && a.world) tags.push('<span class="tag">' + esc(a.world) + '</span>');
+    if (a.event) tags.push('<span class="tag">Special event</span>');
+    tags.push('<span class="tag">' + esc(pageOf(a).label) + '</span>');
+
+    let h = '<button type="button" class="close" title="Close (Esc)">&times;</button><h3>' + esc(a.name) + '</h3><div class="tags">' + tags.join('') + '</div>';
+
+    if (a.kind === 'master') {
+      if (a.portalAreas && a.portalAreas.length) h += section('Portals in this master realm', ICON.portal, '<ul>' + a.portalAreas.map((n) => '<li><div class="stair"><a data-go="' + esc(n) + '">' + esc(n) + '</a></div></li>').join('') + '</ul>');
+      h += section('Entered from the sector map', '', '<ul>' + (a.entries || []).map((n) => '<li><div class="stair"><a data-go="' + esc(n) + '">' + esc(n) + '</a>' + (byName[n] ? '<span class="coord">Lv ' + byName[n].level + '</span>' : '') + '</div></li>').join('') + '</ul>', 'Not known');
+    } else {
+      // creatures
+      const cr = a.creatures || [];
+      h += section('Creatures (' + cr.length + ')', '', cr.length
+        ? '<ul class="cols">' + cr.map((c) => '<li>' + esc(c.name) + '</li>').join('') + '</ul>' : '', 'No creatures listed');
+      // shops
+      const sp = a.shopSpots || [];
+      const shopBody = sp.length
+        ? '<ul>' + sp.map((s) => '<li>' + esc(s.name) + ' ' + coord(s.x, s.y) + '</li>').join('') + '</ul>'
+        : (a.shops && a.shops.length ? '<ul>' + a.shops.map((s) => '<li>' + esc(s) + '</li>').join('') + '</ul>' : '');
+      h += section('Shops', ICON.shop, shopBody, 'No shops');
+      const sv = a.services || [];
+      if (sv.length) h += section('Buildings (' + sv.length + ')', '', '<ul>' + sv.map((v) => '<li>' + (v.bank ? ICON.bank + ' ' : '') + esc(v.name) + (v.note ? ' <span class="coord">' + esc(v.note) + '</span>' : '') + ' ' + coord(v.x, v.y) + '</li>').join('') + '</ul>');
+      // quests
+      h += section('Quests (' + (a.quests || []).length + ')', ICON.quest, (a.quests || []).length ? '<ul>' + a.quests.map(questHTML).join('') + '</ul>' : '', 'No quests');
+      // relics
+      const rl = a.relicSpots || [];
+      if (rl.length || (a.relics && a.relics.length)) {
+        h += section('Artifacts', ICON.relic, '<ul>' + (rl.length ? rl.map((s) => '<li>' + esc(s.name) + ' ' + coord(s.x, s.y) + '</li>') : a.relics.map((s) => '<li>' + esc(s) + '</li>')).join('') + '</ul>');
+      }
+      // portals
+      if (a.portals.length) {
+        h += section('Portal', ICON.portal, '<ul>' + a.portals.map((s) => '<li>' + esc(s.name) + ' ' + coord(s.x, s.y) + '</li>').join('') + '</ul>');
+      }
+      // exits
+      const ex = a.worldExits.map((e) => '<li><div class="stair"><span>Sector map: <a data-go="' + esc(e.world) + '">' + esc(e.world) + '</a></span>' + coord(e.x, e.y) + '</div></li>');
+      const st = a.stairs.map((s) => {
+        const o = byName[s.to];
+        return '<li><div class="stair"><span>&rarr; <a data-go="' + esc(s.to) + '">' + esc(s.to) + '</a>' + (o ? ' <span class="coord">Lv ' + o.level + '</span>' : '') + (o && pageOf(o).id !== pageOf(a).id ? ' <span class="coord">' + esc(pageOf(o).label) + '</span>' : '') +
+          (s.note ? ' <span class="coord">' + esc(s.note) + '</span>' : '') + '</span>' + coord(s.x, s.y) + '</div></li>';
+      });
+      h += section('Exits &amp; stairs', '', '<ul>' + ex.concat(st).join('') + '</ul>', 'None known');
+    }
+
+    if (pinned) {
+      h += '<div class="acts"><button type="button" data-act="from">Route from here</button><button type="button" data-act="to">Route to here</button>' +
+        (guideUrl(a) ? '<a href="' + guideUrl(a) + '" target="_blank" rel="noopener">Guide page</a>' : '') +
+        '<a href="' + wikiUrl(a) + '" target="_blank" rel="noopener">Wiki page</a></div>';
+    } else {
+      h += '<div class="hint">Click the area to pin this card.</div>';
+    }
+    return h;
+  }
+
+  const card = $('#card');
+  function placeCard(x, y) {
+    const w = card.offsetWidth;
+    const hgt = card.offsetHeight;
+    let left = x + 18;
+    let top = y + 14;
+    if (left + w > window.innerWidth - 10) left = Math.max(10, x - w - 18);
+    if (top + hgt > window.innerHeight - 10) top = Math.max(10, window.innerHeight - hgt - 10);
+    card.style.left = left + 'px';
+    card.style.top = top + 'px';
+  }
+  function showCard(name, x, y, pinned) {
+    const a = byName[name];
+    if (!a) return;
+    card.innerHTML = cardHTML(a, pinned);
+    card.classList.toggle('pinned', !!pinned);
+    card.hidden = false;
+    card.dataset.name = name;
+    placeCard(x, y);
+  }
+  function hideCard() { card.hidden = true; card.classList.remove('pinned'); state.pinned = null; }
+
+  // ---------------------------------------------------------------- highlight on hover
+  function neighbours(name) { return adj[name].filter((e) => e.kind !== 'world').map((e) => e.to); }
+  function focusNode(name) {
+    const map = $('#map');
+    map.classList.add('focus');
+    const near = neighbours(name);
+    Object.keys(nodeEls).forEach((k) => {
+      const el = nodeEls[k];
+      el.classList.toggle('me', k === name);
+      el.classList.toggle('hl', near.indexOf(k) !== -1);
+    });
+    Object.keys(lineEls).forEach((k) => {
+      const ln = lineEls[k];
+      ln.classList.toggle('hl', ln.dataset.a === name || ln.dataset.b === name);
+    });
+  }
+  function unfocus() {
+    $('#map').classList.remove('focus');
+    Object.keys(nodeEls).forEach((k) => nodeEls[k].classList.remove('me', 'hl'));
+    Object.keys(lineEls).forEach((k) => lineEls[k].classList.remove('hl'));
+  }
+
+  // ---------------------------------------------------------------- routing
+  const findRoute = R.findRoute;
+  // a master realm is shown with its level in brackets, the way the game sorts its portal menu
+  const wm = (n) => esc(n) + (byName[n] && byName[n].kind === 'master' ? ' [' + byName[n].level + ']' : '');
+  const link = (n) => '<a data-go="' + esc(n) + '">' + wm(n) + '</a>';
+  function stepText(s) {
+    const e = s.edge;
+    const walk = s.walk ? ' <span class="mv">' + s.walk + ' move' + (s.walk === 1 ? '' : 's') + ' to get there</span>' : '';
+    if (e.kind === 'free') {
+      return 'Teleport to ' + link(e.to) + ' <span class="sub">&mdash; from anywhere, costs 25 energy</span>';
+    }
+    if (e.kind === 'portal') {
+      return 'In ' + link(s.from) + ', walk to the <b>portal</b> ' + coord(e.x, e.y) + walk + ' and teleport to the ' + link(e.to) +
+        ' <span class="sub">&mdash; sector map</span>';
+    }
+    if (e.kind === 'stairs') {
+      return 'In ' + link(s.from) + ', take the stairs' + (e.x != null ? ' at ' + coord(e.x, e.y) : '') + walk + ' to ' + link(e.to) +
+        (e.ax != null ? ' <span class="sub">&mdash; you arrive at ' + coord(e.ax, e.ay) + '</span>' : '');
+    }
+    if (e.kind === 'exit') {
+      return 'Leave ' + link(s.from) + ' to the <b>' + wm(e.to) + '</b> sector map' + (e.x != null ? ' <span class="sub">&mdash; exit tile ' + coord(e.x, e.y) + '</span>' : '');
+    }
+    if (e.kind === 'enter') {
+      return 'From the <b>' + wm(s.from) + '</b> sector map, enter ' + link(e.to) + (e.x != null ? ' <span class="sub">&mdash; you appear at ' + coord(e.x, e.y) + '</span>' : '');
+    }
+    return 'Cross from <b>' + wm(s.from) + '</b> to <b>' + wm(e.to) + '</b>';
+  }
+  function runRoute(from, to) {
+    const panel = $('#routePanel');
+    const fa = byName[from];
+    const ta = byName[to];
+    if (!fa || !ta) {
+      panel.hidden = false;
+      panel.innerHTML = '<h2>Route</h2><div class="err">Pick both areas from the suggestion list.</div>';
+      return;
+    }
+    const steps = from === to ? [] : findRoute(from, to);
+    state.route = steps ? { from, to, steps } : null;
+    panel.hidden = false;
+    $('#rClear').hidden = false;
+    if (!steps) {
+      panel.innerHTML = '<h2>Route</h2><div class="err">No known way from <b>' + esc(from) + '</b> to <b>' + esc(to) + '</b> in this data.</div>';
+      applyRoute();
+      return;
+    }
+    const path = [from].concat(steps.map((s) => s.edge.to));
+    const maxLv = Math.max.apply(null, path.map((n) => byName[n].level));
+    panel.innerHTML =
+      '<h2>' + link(from) + ' &rarr; ' + link(to) + '<small>' + steps.length + ' step' + (steps.length === 1 ? '' : 's') + ' &middot; about ' + Math.round(steps.total) + ' moves &middot; highest minimum level on the way: ' + maxLv + '</small></h2>' +
+      '<ol><li><span>Start in ' + link(from) + ' <span class="sub">(level ' + fa.level + ')</span></span></li>' +
+      steps.map((s) => '<li><span>' + stepText(s) + '</span></li>').join('') +
+      '<li><span>You are in ' + link(to) + '</span></li></ol>';
+    applyRoute();
+    panel.scrollIntoView({ block: 'nearest' });
+  }
+  function applyRoute() {
+    const map = $('#map');
+    Object.keys(nodeEls).forEach((k) => nodeEls[k].classList.remove('route'));
+    Object.keys(lineEls).forEach((k) => lineEls[k].classList.remove('route'));
+    if (!state.route) { map.classList.remove('routing'); return; }
+    map.classList.add('routing');
+    const path = [state.route.from].concat(state.route.steps.map((s) => s.edge.to));
+    path.forEach((n) => { if (nodeEls[n]) nodeEls[n].classList.add('route'); });
+    state.route.steps.forEach((s) => {
+      const k0 = [s.from, s.edge.to].sort().join('\u0000');
+      Object.keys(lineEls).forEach((k) => { if (k.split('#')[0] === k0) lineEls[k].classList.add('route'); });
+    });
+  }
+  function clearRoute() {
+    state.route = null;
+    $('#routePanel').hidden = true;
+    $('#rClear').hidden = true;
+    applyRoute();
+  }
+
+  // ---------------------------------------------------------------- jump to an area
+  function goTo(name, pin) {
+    const a = byName[name];
+    if (!a) return;
+    if (pageOf(a).id !== state.page) { renderPage(pageOf(a).id).then(() => goTo(name, pin)); return; }
+    const el = nodeEls[name];
+    if (!el) return;
+    el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    el.classList.remove('found');
+    void el.offsetWidth;
+    el.classList.add('found');
+    setTimeout(() => el.classList.remove('found'), 2800);
+    if (pin !== false) {
+      setTimeout(() => {
+        const r = el.getBoundingClientRect();
+        state.pinned = name;
+        showCard(name, r.right, r.top, true);
+      }, 520);
+    }
+  }
+
+  // The arrow tab of a dashed area. If everything it leads to is on one other page, go there; if it leads to several pages,
+  // pin its info card, which lists every exit with the page it is on (each one is a link).
+  function jumpOn(name) {
+    const out = offPage(byName[name]);
+    if (!out.length) return;
+    if (new Set(out.map((o) => pageOf(o).id)).size === 1) { hideCard(); unfocus(); goTo(out[0].name); return; }
+    const r = nodeEls[name].getBoundingClientRect();
+    state.pinned = name;
+    showCard(name, r.right, r.top, true);
+  }
+
+  // ---------------------------------------------------------------- autocomplete
+  function attachAC(input, ul, onPick) {
+    let items = [];
+    let on = -1;
+    const find = (q) => {
+      q = norm(q);
+      if (!q) return D.areas.slice().sort((x, y) => x.level - y.level || x.name.localeCompare(y.name)).slice(0, 12);
+      return D.areas.map((a) => {
+        const n = norm(a.name);
+        const i = n.indexOf(q);
+        return { a, s: i === 0 ? 0 : i > 0 ? 1 : 9 };
+      }).filter((x) => x.s < 9).sort((x, y) => x.s - y.s || x.a.level - y.a.level || x.a.name.localeCompare(y.a.name)).slice(0, 12).map((x) => x.a);
+    };
+    const draw = () => {
+      items = find(input.value);
+      on = items.length ? 0 : -1;
+      ul.innerHTML = items.map((a, i) => '<li data-i="' + i + '"' + (i === on ? ' class="on"' : '') + '><b>' + esc(a.name) + '</b><small>' + (a.kind === 'master' ? 'master realm &middot; ' : '') + 'Lv ' + a.level + '</small></li>').join('');
+      ul.hidden = !items.length;
+    };
+    const mark = () => ul.querySelectorAll('li').forEach((li, i) => li.classList.toggle('on', i === on));
+    const pick = (a) => { ul.hidden = true; input.value = a.name; onPick(a); };
+    input.addEventListener('input', draw);
+    input.addEventListener('focus', draw);
+    input.addEventListener('blur', () => setTimeout(() => { ul.hidden = true; }, 150));
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowDown') { on = Math.min(items.length - 1, on + 1); mark(); e.preventDefault(); }
+      else if (e.key === 'ArrowUp') { on = Math.max(0, on - 1); mark(); e.preventDefault(); }
+      else if (e.key === 'Enter') {
+        const exact = byName[input.value];
+        const a = ul.hidden ? exact : items[on] || exact;
+        if (a) { pick(a); e.preventDefault(); }
+        else if (onPick.enter) onPick.enter();
+      } else if (e.key === 'Escape') { ul.hidden = true; }
+    });
+    ul.addEventListener('mousedown', (e) => {
+      const li = e.target.closest('li');
+      if (li) { e.preventDefault(); pick(items[+li.dataset.i]); }
+    });
+  }
+
+  // ---------------------------------------------------------------- wiring
+  function wire() {
+    const q = $('#q');
+    const from = $('#rFrom');
+    const to = $('#rTo');
+    attachAC(q, $('#qSugg'), (a) => goTo(a.name));
+    const go = () => { if (from.value && to.value) runRoute(from.value, to.value); };
+    const onRoutePick = () => go();
+    attachAC(from, $('#rFromSugg'), onRoutePick);
+    attachAC(to, $('#rToSugg'), onRoutePick);
+    $('#rGo').addEventListener('click', go);
+    $('#rClear').addEventListener('click', clearRoute);
+    $('#rSwap').addEventListener('click', () => { const t = from.value; from.value = to.value; to.value = t; if (from.value && to.value) go(); });
+
+    // on phones the level list is a drawer opened from the page bar
+    const showSide = (on) => {
+      document.body.classList.toggle('sideOpen', on);
+      $('#sideScrim').hidden = !on;
+      $('#levelsBtn').setAttribute('aria-expanded', String(on));
+    };
+    // on wider screens the same button folds the list away; the choice is remembered
+    const narrowScreen = () => window.matchMedia('(max-width: 900px)').matches;
+    const foldSide = (hide, relayout) => {
+      document.body.classList.toggle('sideHidden', hide);
+      $('#levelsBtn').setAttribute('aria-expanded', String(!hide));
+      try { localStorage.setItem('sspf_side', hide ? '0' : '1'); } catch (err) { /* ignore */ }
+      if (relayout) window.dispatchEvent(new Event('resize')); // the map is wider now
+    };
+    try { if (localStorage.getItem('sspf_side') === '0' && !narrowScreen()) foldSide(true, false); else if (!narrowScreen()) $('#levelsBtn').setAttribute('aria-expanded', 'true'); } catch (err) { /* ignore */ }
+    $('#levelsBtn').addEventListener('click', () => {
+      if (narrowScreen()) showSide(!document.body.classList.contains('sideOpen'));
+      else foldSide(!document.body.classList.contains('sideHidden'), true);
+    });
+    $('#sideScrim').addEventListener('click', () => showSide(false));
+    $('#tabs').addEventListener('click', (e) => {
+      const b = e.target.closest('button[data-p]');
+      if (b) { showSide(false); hideCard(); unfocus(); renderPage(+b.dataset.p); window.scrollTo({ top: 0, behavior: 'smooth' }); }
+    });
+    $('#tabs').addEventListener('toggle', (e) => {
+      const d = e.target;
+      if (d.open) {
+        state.openGroup = d.dataset.g;
+        $('#tabs').querySelectorAll('details[open]').forEach((o) => { if (o !== d) o.open = false; });
+      } else if (state.openGroup === d.dataset.g) state.openGroup = null;
+    }, true);
+    // on phones the two finders are folded away; their icons in the header show them
+    [['#findBtn', 'pFind', '#q'], ['#routeBtn', 'pRoute', '#rFrom']].forEach(([btn, cls, input]) => {
+      $(btn).addEventListener('click', () => {
+        const on = !document.body.classList.contains(cls);
+        document.body.classList.toggle(cls, on);
+        $(btn).setAttribute('aria-expanded', String(on));
+        if (on) $(input).focus();
+      });
+    });
+    // Sigmastorm (steel and hazard stripes) or plain dark theme; the choice is remembered. The page already has it applied from index.html.
+    const themeBtn = $('#themeBtn');
+    const setTheme = (name) => {
+      document.documentElement.dataset.theme = name;
+      themeBtn.textContent = 'Theme: ' + (name === 'dark' ? 'Plain dark' : 'Sigmastorm');
+      try { localStorage.setItem('sspf_theme', name); } catch (err) { /* ignore */ }
+    };
+    setTheme(document.documentElement.dataset.theme === 'dark' ? 'dark' : 'sigma');
+    const about = $('#about');
+    $('#aboutBtn').addEventListener('click', () => about.showModal());
+    about.addEventListener('click', (e) => { if (e.target === about) about.close(); }); // the backdrop
+    themeBtn.addEventListener('click', () => setTheme(document.documentElement.dataset.theme === 'dark' ? 'sigma' : 'dark'));
+    // the header only sticks on wide screens; on phones it scrolls away and the page bar sticks to the top
+    const hh = () => document.documentElement.style.setProperty('--hh', getComputedStyle($('#top')).position === 'sticky' ? $('#top').offsetHeight + 'px' : '0px');
+    hh(); window.addEventListener('resize', hh);
+    $('#goLevel').addEventListener('change', (e) => {
+      const l = +e.target.value;
+      const p = D.pages.find((x) => l >= x.min && l <= x.max);
+      if (p) { showSide(false); hideCard(); unfocus(); renderPage(p.id); window.scrollTo({ top: 0, behavior: 'smooth' }); }
+    });
+    $('#worldStrip').addEventListener('click', (e) => {
+      const w = e.target.closest('.w');
+      if (!w) return;
+      const m = byName[w.dataset.w];
+      const show = () => { const sec = $('#w-' + norm(m.name)); if (sec) sec.scrollIntoView({ behavior: 'smooth', block: 'start' }); };
+      if (!$('#w-' + norm(m.name))) renderPage(pageOf(m).id).then(show); else show();
+    });
+    // the legend hangs from the sticky page bar, so it can be opened anywhere on the page; the choice is remembered
+    const showLegend = (on) => {
+      $('#legend').hidden = !on;
+      $('#legendBtn').setAttribute('aria-expanded', String(on));
+      try { localStorage.setItem('sspf_legend', on ? '1' : '0'); } catch (err) { /* ignore */ }
+    };
+    try { if (localStorage.getItem('sspf_legend') === '1') showLegend(true); } catch (err) { /* ignore */ }
+    $('#legendBtn').addEventListener('click', () => showLegend($('#legend').hidden));
+
+    // find realms by the creatures that live there, listed by level
+    const crBox = $('#creatures');
+        const crName = $('#crName');
+    const realms = D.areas.filter((a) => a.kind === 'realm' && a.creatures && a.creatures.length);
+    const crDraw = () => {
+      const race = '';
+      const nm = norm(crName.value);
+      const hit = [];
+      realms.forEach((a) => {
+        const m = a.creatures.filter((c) => (!race || c.race === race) && (!nm || norm(c.name).includes(nm)));
+        if (m.length && (race || nm)) hit.push({ a, m });
+      });
+      hit.sort((x, y) => x.a.level - y.a.level || x.a.name.localeCompare(y.a.name));
+      $('#crCount').textContent = hit.length ? hit.length + ' area' + (hit.length === 1 ? '' : 's') : '';
+      $('#crList').innerHTML = hit.length ? hit.map((h, i) => '<li data-n="' + esc(h.a.name) + '"><span class="id">Lv ' + h.a.level + '</span><span class="nm">' + esc(h.a.name) + '</span><span class="lv">' + esc(h.a.world) + '</span>' +
+        '<span class="mt">' + esc(h.m.slice(0, 4).map((c) => c.name).join(', ')) + (h.m.length > 4 ? ' +' + (h.m.length - 4) + ' more' : '') + '</span></li>').join('')
+        : '<li class="none">' + (race || nm ? 'No area has such creatures listed.' : 'Type a creature name.') + '</li>';
+    };
+    const showCreatures = (on) => {
+      crBox.hidden = !on;
+      $('#creatureBtn').setAttribute('aria-expanded', String(on));
+      if (on) { crDraw(); crName.focus(); }
+    };
+    $('#creatureBtn').addEventListener('click', () => showCreatures(crBox.hidden));
+        crName.addEventListener('input', crDraw);
+    $('#crList').addEventListener('click', (e) => { const li = e.target.closest('li[data-n]'); if (li) { hideCard(); unfocus(); goTo(li.dataset.n); } });
+
+    const map = $('#map');
+    map.addEventListener('mouseover', (e) => {
+      const n = e.target.closest('.node');
+      if (!n) return;
+      focusNode(n.dataset.name);
+      if (!state.pinned) { state.hover = n.dataset.name; showCard(n.dataset.name, e.clientX, e.clientY, false); }
+    });
+    map.addEventListener('mousemove', (e) => { if (!state.pinned && !card.hidden) placeCard(e.clientX, e.clientY); });
+    map.addEventListener('mouseout', (e) => {
+      const n = e.target.closest('.node');
+      if (!n || n.contains(e.relatedTarget)) return;
+      unfocus();
+      if (!state.pinned) { state.hover = null; card.hidden = true; }
+    });
+    map.addEventListener('click', (e) => {
+      const jump = e.target.closest('[data-jump]');
+      if (jump) { e.preventDefault(); e.stopPropagation(); jumpOn(jump.closest('.node').dataset.name); return; }
+      if (e.target.closest('a')) return; // Guide / Wiki links open normally
+      const n = e.target.closest('.node');
+      if (n) {
+        e.stopPropagation();
+        state.pinned = n.dataset.name;
+        showCard(n.dataset.name, e.clientX, e.clientY, true);
+      }
+    });
+    // drag a box to move it; the lines follow. A mouse drags at once, a finger after a short press (a quick swipe still scrolls).
+    let drag = null;
+    let justDragged = false;
+    const updateLines = (g, name) => {
+      g.routes.forEach((r) => { if (r.a === name || r.b === name) r.pts = routePts(g, r); });
+      const cr = g.canvas.getBoundingClientRect();
+      const base = map.getBoundingClientRect();
+      $('#edges').querySelectorAll('.ln').forEach((ln) => {
+        if (ln._g !== g || (ln._r.a !== name && ln._r.b !== name)) return;
+        ln.setAttribute('points', ln._r.pts.map((p) => (p[0] + cr.left - base.left).toFixed(1) + ',' + (p[1] + cr.top - base.top).toFixed(1)).join(' '));
+      });
+    };
+    map.addEventListener('pointerdown', (e) => {
+      if (e.button > 0 || e.target.closest('a')) return;
+      const n = e.target.closest('.node');
+      const g = n && graphs.find((x) => x.canvas.contains(n));
+      if (!g || !g.cur[n.dataset.name]) return;
+      const p = g.cur[n.dataset.name];
+      drag = { n, g, name: n.dataset.name, sx: e.clientX, sy: e.clientY, ox: p[0], oy: p[1], on: false, touch: e.pointerType === 'touch' };
+      const start = () => {
+        if (!drag || drag.on) return;
+        drag.on = true; n.classList.add('dragging'); hideCard(); unfocus();
+        if (navigator.vibrate) navigator.vibrate(12);
+      };
+      drag.start = start;
+      if (drag.touch) drag.timer = setTimeout(start, 350);
+    });
+    window.addEventListener('pointermove', (e) => {
+      if (!drag) return;
+      const dx = e.clientX - drag.sx;
+      const dy = e.clientY - drag.sy;
+      if (!drag.on) {
+        if (drag.touch) { if (Math.hypot(dx, dy) > 8) { clearTimeout(drag.timer); drag = null; } return; }
+        if (Math.hypot(dx, dy) < 5) return;
+        drag.start();
+      }
+      e.preventDefault();
+      const { g, name, n } = drag;
+      g.cur[name] = [Math.max(0, Math.round(drag.ox + dx)), Math.max(0, Math.round(drag.oy + dy))];
+      g.moved.add(name);
+      n.style.left = g.cur[name][0] + 'px';
+      n.style.top = g.cur[name][1] + 'px';
+      fitCanvas(g);
+      updateLines(g, name);
+    });
+    document.addEventListener('touchmove', (e) => { if (drag && drag.on && e.cancelable) e.preventDefault(); }, { passive: false });
+    const endDrag = (save) => {
+      if (!drag) return;
+      clearTimeout(drag.timer);
+      const d = drag;
+      drag = null;
+      d.n.classList.remove('dragging');
+      if (!d.on) return;
+      justDragged = true;
+      setTimeout(() => { justDragged = false; }, 60);
+      if (save) savePos(d.g);
+      drawEdges();
+      applyRoute();
+    };
+    window.addEventListener('pointerup', () => endDrag(true));
+    window.addEventListener('pointercancel', () => endDrag(false));
+    map.addEventListener('click', (e) => { if (justDragged) { e.stopPropagation(); e.preventDefault(); } }, true);
+    map.addEventListener('contextmenu', (e) => { if (drag && drag.on) e.preventDefault(); });
+    $('#resetBtn').addEventListener('click', () => {
+      try { localStorage.removeItem(POS_KEY); } catch (err) { /* ignore */ }
+      hideCard(); unfocus(); renderPage(state.page);
+    });
+    document.addEventListener('click', (e) => {
+      if (card.classList.contains('pinned') && !e.target.closest('#card') && !e.target.closest('.node')) hideCard();
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { showSide(false); hideCard(); if (!$('#legend').hidden) showLegend(false); if (!crBox.hidden) showCreatures(false); }
+      if (e.key === '/' && !/INPUT|TEXTAREA/.test((document.activeElement || {}).tagName || '')) { e.preventDefault(); q.focus(); q.select(); }
+    });
+    card.addEventListener('click', (e) => {
+      const go2 = e.target.closest('[data-go]');
+      if (go2) { e.preventDefault(); hideCard(); goTo(go2.dataset.go); return; }
+      if (e.target.closest('.close')) { hideCard(); return; }
+      const act = e.target.closest('[data-act]');
+      if (act) {
+        const name = card.dataset.name;
+        (act.dataset.act === 'from' ? from : to).value = name;
+        hideCard();
+        if (from.value && to.value) runRoute(from.value, to.value);
+        else (act.dataset.act === 'from' ? to : from).focus();
+      }
+    });
+    $('#routePanel').addEventListener('click', (e) => {
+      const g = e.target.closest('[data-go]');
+      if (g) { e.preventDefault(); goTo(g.dataset.go, false); }
+    });
+
+    let t = null;
+    let lastW = $('#map').offsetWidth;
+    window.addEventListener('resize', () => {
+      clearTimeout(t);
+      t = setTimeout(() => { const w = $('#map').offsetWidth; if (w !== lastW) { lastW = w; renderPage(state.page); } else drawEdges(); }, 150);
+    });
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(drawEdges);
+  }
+
+  // ---------------------------------------------------------------- start
+  renderLegend();
+  wire();
+  renderPage(state.page);
+  $('#foot').innerHTML = 'A Path Finder tool for <a href="https://www.sigmastorm.com/" target="_blank" rel="noopener">Sigmastorm</a>, ' +
+    'inspired by the <a href="https://cristimirt.github.io/fspathfinder/" target="_blank" rel="noopener">Fallen Sword Path Finder</a>. ' +
+    'Not affiliated with Hunted Cow Studios.';
+  const foot = () => document.documentElement.style.setProperty('--fh', $('#foot').offsetHeight + 'px');
+  foot();
+  window.addEventListener('resize', foot);
+})();

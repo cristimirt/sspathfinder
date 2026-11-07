@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sigmastorm Path Finder</title>
+<script>try { if (localStorage.getItem('sspf_theme') === 'dark') document.documentElement.dataset.theme = 'dark'; } catch (e) { /* no storage */ }</script>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header id="top">
+  <div class="brand">
+    <h1>Sigmastorm <span>Path Finder</span></h1>
+    <p>Levels 1 &ndash; 440</p>
+  </div>
+
+  <div class="tools">
+    <div class="field ac">
+      <label for="q">Find an area</label>
+      <input id="q" type="search" placeholder="e.g. Data Store, Highridge&hellip;  ( / )" autocomplete="off">
+      <ul class="sugg" id="qSugg" hidden></ul>
+    </div>
+
+    <div class="route">
+      <div class="field ac">
+        <label for="rFrom">Route from</label>
+        <input id="rFrom" type="text" placeholder="Start area" autocomplete="off">
+        <ul class="sugg" id="rFromSugg" hidden></ul>
+      </div>
+      <button id="rSwap" type="button" title="Swap start and destination">&#8644;</button>
+      <div class="field ac">
+        <label for="rTo">to</label>
+        <input id="rTo" type="text" placeholder="Destination" autocomplete="off">
+        <ul class="sugg" id="rToSugg" hidden></ul>
+      </div>
+      <button id="rGo" type="button" class="primary">Find route</button>
+      <button id="rClear" type="button" class="ghost" hidden>Clear</button>
+    </div>
+  </div>
+  <button id="findBtn" type="button" class="ghost iconBtn" aria-expanded="false" aria-label="Find an area" title="Find an area"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5L21 21"/></svg></button>
+  <button id="routeBtn" type="button" class="ghost iconBtn" aria-expanded="false" aria-label="Find a route" title="Find a route between two areas"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="6" r="2.5"/><path d="M8.5 18H14a3.5 3.5 0 0 0 0-7h-4a3.5 3.5 0 0 1 0-7h5.5" stroke-dasharray="0"/></svg></button>
+  <button id="aboutBtn" type="button" class="ghost" title="About this tool">About</button>
+  <button id="themeBtn" type="button" class="ghost" title="Switch between the Sigmastorm look and a plain dark theme">Theme</button>
+</header>
+
+<div id="shell">
+<aside id="side" aria-label="Levels">
+  <label id="goWrap">Go to level <input id="goLevel" type="number" min="1" max="440" placeholder="e.g. 250"></label>
+  <div id="tabs"></div>
+</aside>
+<div id="content">
+
+<nav id="pageBar">
+  <button id="levelsBtn" type="button" class="ghost" aria-expanded="false" aria-controls="side">&#9776; Levels</button>
+  <div id="pageTitle"></div>
+  <div id="worldStrip" aria-label="Master realms on this page"></div>
+  <button id="creatureBtn" type="button" class="ghost" aria-expanded="false" title="Find areas by the creatures living there">Creatures</button>
+  <button id="resetBtn" type="button" class="ghost" title="Put the boxes you moved back where they were">Reset layout</button>
+  <button id="legendBtn" type="button" class="ghost" aria-expanded="false">Legend</button>
+  <section id="creatures" hidden>
+    <div class="crRow">
+      <label>Creature name <input id="crName" type="search" placeholder="e.g. Android" autocomplete="off"></label>
+      <span id="crCount"></span>
+    </div>
+    <ol id="crList"></ol>
+  </section>
+  <section id="legend" hidden></section>
+</nav>
+
+<div id="routePanel" hidden></div>
+
+<main id="mapWrap">
+  <div id="map">
+    <svg id="edges" aria-hidden="true"></svg>
+    <div id="sections"></div>
+  </div>
+</main>
+
+<dialog id="about" aria-labelledby="aboutTitle">
+  <form method="dialog"><button class="aboutX" aria-label="Close" title="Close">&times;</button></form>
+  <h2 id="aboutTitle">Sigmastorm <span>Path Finder</span></h2>
+  <p>Browse every area of <a href="https://www.sigmastorm.com/" target="_blank" rel="noopener">Sigmastorm</a> by level, see how they connect and what they hold (creatures, shops, buildings, quests, artifacts, portals), and find the shortest way from one area to another.</p>
+  <h3>How to use it</h3>
+  <ul>
+    <li>Use <b>Route from / to</b> in the header to get step-by-step directions. Stairs, sector maps, portals and the 25 energy teleport to Taulin Rad Lands are all considered.</li>
+    <li>Hover or tap an area for its info card. Drag areas to rearrange them; positions are kept in your browser and <b>Reset layout</b> puts them back.</li>
+    <li>Press <kbd>/</kbd> to search for an area.</li>
+  </ul>
+  <h3>Where the data comes from</h3>
+  <p>The stairs, shops, artifacts, portals, buildings and their tiles are read from the tile map of every area in the <a href="https://guide.sigmastorm.com/index.php?cmd=realms" target="_blank" rel="noopener">Ultimate Sigmastorm 2 Guide</a>. Missions and creatures come from the <a href="https://sigmastorm2.fandom.com/wiki/Category:Areas" target="_blank" rel="noopener">Sigma Storm 2 wiki</a>, which is community-maintained and covers fewer areas, so some areas list no creatures or missions. Route lengths are estimates: walking is the straight-line distance and obstacles are ignored. Every portal can teleport you to any master realm, and you can teleport to Taulin Rad Lands from anywhere for 25 energy (counted as 25 moves); the route finder uses both.</p>
+  <h3>Feedback</h3>
+  <p>Suggestions and bug reports are welcome on <a href="https://github.com/cristimirt/sspathfinder" target="_blank" rel="noopener">GitHub</a>; please <a href="https://github.com/cristimirt/sspathfinder/issues" target="_blank" rel="noopener">open an issue</a> there.</p>
+  <p class="aboutFoot">Not affiliated with Hunted Cow Studios.</p>
+</dialog>
+
+<footer id="foot"></footer>
+
+</div>
+</div>
+
+<div id="sideScrim" hidden></div>
+<div id="card" hidden></div>
+
+<script src="data.js"></script>
+<script src="vendor/elk.bundled.js"></script>
+<script src="route.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
